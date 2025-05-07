@@ -1,0 +1,13 @@
+# k8s/documents-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: documents
+spec:
+  type: ClusterIP            # ← expose externally
+  selector:
+    app: documents
+  ports:
+    - protocol: TCP
+      port: 80                  # external port
+      targetPort: 8000          # container port

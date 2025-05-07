@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: documents
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+    
+      app: documents
+  template:
+    metadata:
+      labels:
+        app: documents
+    spec:
+      containers:
+        - name: documents
+          image:  us-south1-docker.pkg.dev/micro-chiller-458819-r4/oreo-repository/documents:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: BUCKET_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: documents-config
+                  key: BUCKET_NAME
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /var/secrets/google/key.json
+          volumeMounts:
+            - name: gcp-key
+              mountPath: /var/secrets/google
+              readOnly: true
+      volumes:
+        - name: gcp-key
+          secret:
+            secretName: gcp-key
