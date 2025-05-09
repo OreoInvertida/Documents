@@ -1,7 +1,7 @@
 # main.py
 import os
 import datetime
-from fastapi import FastAPI, UploadFile, File, HTTPException, Path, Header, Request, Depends, Body
+from fastapi import FastAPI, Query, UploadFile, File, HTTPException, Path, Header, Request, Depends, Body
 from fastapi.responses import StreamingResponse
 from typing import List, Optional
 from pymongo import MongoClient, DESCENDING
@@ -40,7 +40,7 @@ def get_blob(path: str):
 async def get_user_type(user_id: str, token :str) -> str:
     logger.info(f"token {token}")
     async with httpx.AsyncClient() as client:
-        response = await client.get(f"{USERS_SERVICE_URL}/get/{user_id}", headers={"Authorization" : f"{token}"},timeout=30)
+        response = await client.get(f"{USERS_SERVICE_URL}/get/{user_id}", headers={"Authorization" : f"{token}"},timeout=60)
         if response.status_code != 200:
             raise HTTPException(status_code=503, detail="User service not available")
         data = response.json()
@@ -239,10 +239,7 @@ async def delete_document(request : Request,path: str, token_data: dict = Depend
     return {"message": "Document deleted", "path": clean_path}
 
 
-
-    from fastapi import Body
-
-@app.post("/signed-urls")
+@app.post("/docs/signed-urls")
 async def get_signed_urls(
     request: Request,
     document_paths: List[str] = Body(..., embed=True),
@@ -250,7 +247,6 @@ async def get_signed_urls(
 ):
     requester_id = token_data.get("sub")
     token = request.headers.get("authorization", "")
-
     user_type = await get_user_type(requester_id, token)
 
     # 🔐 Validate ownership first (only for non-gov users)
@@ -273,6 +269,44 @@ async def get_signed_urls(
         url = blob.generate_signed_url(
             version="v4",
             expiration=datetime.timedelta(minutes=30),
+            method="GET"
+        )
+        signed_urls[path] = url
+
+    return {"signed_urls": signed_urls}
+
+
+@app.get("/docs/{user_id}")
+async def list_documents(
+    request: Request,
+    user_id: str,
+    signed: bool = Query(False),
+    token_data: dict = Depends(verify_token)
+):
+    requester_id = token_data.get("sub")
+    token = request.headers.get("authorization", "")
+    user_type = await get_user_type(requester_id, token)
+
+    if user_type != "gov_official" and requester_id != user_id:
+        raise HTTPException(status_code=403, detail="Access denied to this folder")
+
+    query_prefix = f"{user_id}/"
+    documents = collection.find({"path": {"$regex": f"^{query_prefix}"}})
+    paths = [doc["path"] for doc in documents]
+
+    if not signed:
+        return {"paths": paths}
+
+    # Return signed URLs instead
+    signed_urls = {}
+    for path in paths:
+        blob = get_blob(path)
+        if not blob.exists():
+            raise  HTTPException(status_code=500, detail=f"path does not exists")# Optionally skip or raise
+
+        url = blob.generate_signed_url(
+            version="v4",
+            expiration=datetime.timedelta(minutes=120),
             method="GET"
         )
         signed_urls[path] = url
