@@ -4,3 +4,4 @@ metadata:
   name: documents-config
 data:
   BUCKET_NAME: "oreo-documents"
+  USERS_SERVICE_URL: "http://users"

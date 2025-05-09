@@ -29,6 +29,11 @@ spec:
                 configMapKeyRef:
                   name: documents-config
                   key: BUCKET_NAME
+            - name : USERS_SERVICE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name : documents-config
+                  key: USERS_SERVICE_URL
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: /var/secrets/google/key.json
           volumeMounts:
