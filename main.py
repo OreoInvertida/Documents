@@ -11,9 +11,25 @@ from bson.objectid import ObjectId
 from services.token_service import verify_token
 from utils.logger import logger
 import httpx
+from datetime import datetime
+from pydantic import BaseModel
 
 
 app = FastAPI()
+
+
+class CopyRequest(BaseModel):
+    files: List[str]
+    dest: str
+
+def blob_exists(path: str) -> bool:
+    blob = get_blob(path)
+    return blob.exists()
+
+def generate_timestamped_name(filename: str) -> str:
+    name, ext = os.path.splitext(filename)
+    timestamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")[:-3]  # Up to milliseconds
+    return f"{name}_{timestamp}{ext}"
 
 # Configuration
 BUCKET_NAME = os.getenv("BUCKET_NAME")
@@ -28,9 +44,14 @@ mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["documents_db"]
 collection = db["files"]
 
+def folder_exists(prefix: str) -> bool:
+    bucket = storage_client.bucket(BUCKET_NAME)
+    blobs = bucket.list_blobs(prefix=prefix)
+    return any(True for _ in blobs)  # returns True if any file exists with that prefix
+
 # Utilities
 def now_utc():
-    return datetime.datetime.utcnow()
+    return datetime.utcnow()
 
 def get_blob(path: str):
     bucket = storage_client.bucket(BUCKET_NAME)
@@ -214,29 +235,25 @@ async def sign_document(document_id: str, token_data: dict = Depends(verify_toke
 async def delete_document(request : Request,path: str, token_data: dict = Depends(verify_token)):
     user_id = token_data["sub"]
     token = request.headers.get("authorization", "")
-    user_type = get_user_type(user_id, token=token)
-    clean_path = path.lstrip("/").removeprefix("doc/")
-    logger.info("Deleting document: %s", clean_path)
-
+    user_type = await get_user_type(user_id, token=token)
+    logger.info("Deleting document: %s", path)
     # Check metadata
-    doc = collection.find_one({"path": clean_path})
+    doc = collection.find_one({"path": path})
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
-
     if doc["user_id"] != user_id and user_type != "gov_official":
         raise HTTPException(status_code=403, detail="You do not have permission to delete this document")
-
     # Delete from GCS
-    blob = get_blob(clean_path)
+    blob = get_blob(path)
     if blob.exists():
         blob.delete()
     else:
-        logger.warning(f"Blob not found in GCS: {clean_path}")
+        logger.warning(f"Blob not found in GCS: {path}")
 
     # Delete from DB
-    collection.delete_one({"path": clean_path})
+    collection.delete_one({"path": path})
 
-    return {"message": "Document deleted", "path": clean_path}
+    return {"message": "Document deleted", "path": path}
 
 
 @app.post("/docs/signed-urls")
@@ -268,7 +285,7 @@ async def get_signed_urls(
 
         url = blob.generate_signed_url(
             version="v4",
-            expiration=datetime.timedelta(minutes=30),
+            expiration=30,
             method="GET"
         )
         signed_urls[path] = url
@@ -312,3 +329,58 @@ async def list_documents(
         signed_urls[path] = url
 
     return {"signed_urls": signed_urls}
+
+
+@app.post("/copy")
+async def copy_documents(
+    payload: CopyRequest,
+    token_data: dict = Depends(verify_token)
+):
+    source_bucket = storage_client.bucket(BUCKET_NAME)
+    dest_prefix = payload.dest.rstrip("/") + "/"  # Normalize trailing slash
+
+    if not folder_exists(dest_prefix):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Destination folder '{dest_prefix}' does not exist or is empty."
+        )
+
+    
+    results = []
+
+    for file_path in payload.files:
+        source_blob  = get_blob(file_path)
+        if not source_blob.exists():
+            raise HTTPException(status_code=404, detail=f"Source file not found: {file_path}")
+
+        filename = os.path.basename(file_path)
+        dest_path = dest_prefix + filename
+
+        # If file already exists in destination, add timestamp
+        if blob_exists(dest_path):
+            filename = generate_timestamped_name(filename)
+            dest_path = dest_prefix + filename
+
+        source_bucket.copy_blob(source_blob,source_bucket,dest_path)
+
+      # ✅ Store new metadata (no copied_from field)
+        metadata = {
+            "user_id": dest_prefix.split("/")[0],
+            "path": dest_path,
+            "filename": filename,
+            "content_type": source_blob.content_type or "application/octet-stream",
+            "created_at": now_utc(),
+            "last_modified": now_utc(),
+            "signed": False
+        }
+
+        collection.update_one(
+            {"path": dest_path},
+            {"$set": metadata},
+            upsert=True
+        )
+
+
+        results.append(dest_path)
+
+    return {"copied_paths": results}
