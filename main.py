@@ -103,56 +103,6 @@ async def upload_or_replace_document(
     )
     return {"message": "Document uploaded", "path": clean_path}
 
-@app.patch("/doc/{path:path}")
-async def update_document(
-    path: str,
-    file: UploadFile = File(...),
-    token_data: dict = Depends(verify_token)
-):
-    user_id = token_data["sub"]
-
-
-
-    doc = collection.find_one({"path": path})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document does not exist")
-
-    if doc["user_id"] != user_id:
-        raise HTTPException(status_code=403, detail="You do not have permission to update this document")
-
-    blob = get_blob(path)
-    blob.upload_from_file(file.file, content_type=file.content_type)
-
-    collection.update_one(
-        {"path": path},
-        {"$set": {
-            "last_modified": now_utc(),
-            "size": file.spool_max_size,
-            "content_type": file.content_type,
-        }}
-    )
-    return {"message": "Document updated", "path": path}
-
-@app.get("/doc/{path:path}")
-async def download_document(path: str, token_data: dict = Depends(verify_token)):
-    user_id = token_data["sub"]
-    logger.info("path %s",path)
-
-    clean_path = path.lstrip("/").removeprefix("doc/")
-    logger.info("cleaned path: %s", clean_path)
-    
-    doc = collection.find_one({"path": clean_path})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    if doc["user_id"] != user_id:
-        raise HTTPException(status_code=403, detail="You do not have permission to access this document")
-
-    blob = get_blob(clean_path)
-    if not blob.exists():
-        raise HTTPException(status_code=404, detail="File not found")
-    stream = blob.download_as_bytes()
-    return StreamingResponse(iter([stream]), media_type=blob.content_type)
 
 # ─── Endpoint: List ALL metadata (gov only) ────────────────────────────────────
 @app.get("/metadata")
@@ -194,13 +144,22 @@ async def list_metadata_all(
 @app.get("/metadata/{user_id}")
 async def list_metadata_user(
     user_id: str,
+    request : Request,
     limit: int = 10,
     offset: int = 0,
     token_data: dict = Depends(verify_token)
 ):
     requester_id = token_data.get("sub")
-    if not requester_id:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    token = request.headers.get("authorization", "")
+    user_type = await get_user_type(requester_id, token)
+
+    # ✅ Allow access only to gov_officials or the owner
+    if user_type != "gov_official" and requester_id != user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: you can only access your own metadata unless you're a government official."
+        )
+    
 
     total = collection.count_documents({"user_id": user_id})
     items = list(
